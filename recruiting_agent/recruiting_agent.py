@@ -77,19 +77,25 @@ def build_candidate_profile(candidate_id: str) -> dict:
     existing = data_service.get_profile_from_db(candidate_id)["candidate_profile"]
     if existing is not None:
         return {"candidate_profile": existing, "found": True}
-    rec = data_service.get_candidate_record(candidate_id)
-    if rec is None:
+    built = _assemble_candidate_profile(candidate_id)
+    if built is None:
         return {"candidate_profile": None, "found": False}
-    built = {
+    data_service.save_profile_to_db(candidate_id, built)
+    return {"candidate_profile": built, "found": True}
+
+
+def _assemble_candidate_profile(candidate_id):
+    record = data_service.get_candidate_record(candidate_id)
+    if record is None:
+        return None
+    return {
         "candidate_id": candidate_id,
-        "name": rec["name"],
+        "name": record["name"],
         "work_history": data_service.fetch_work_history(candidate_id),
         "education": data_service.fetch_education(candidate_id),
         "skills": data_service.fetch_skills(candidate_id),
-        "years_experience": rec["years_experience"],
+        "years_experience": record["years_experience"],
     }
-    data_service.save_profile_to_db(candidate_id, built)
-    return {"candidate_profile": built, "found": True}
 
 
 SCORING_PROMPT = (
@@ -128,14 +134,16 @@ def _job_has_required_fields(job):
 
 
 @tool
-def score_candidate(candidate_profile: dict, job_description: dict | None = None) -> dict:
-    "Score a candidate profile against a job description on a 1-100 scale with a justification."
-    if job_description is None or not _job_has_required_fields(job_description):
+def score_candidate(candidate_id: str, job_id: str) -> dict:
+    "Score a candidate ID against a job ID, loading both records and the full profile."
+    job_description = data_service.get_job_posting(job_id)
+    if job_description is None:
+        return {"score": None, "error": f"Job {job_id} was not found."}
+    if not _job_has_required_fields(job_description):
         return {"score": None, "error": "Cannot score without a valid job description."}
-    # Score against the candidate's saved skills of record.
-    cid = candidate_profile.get("candidate_id")
-    if cid is not None:
-        candidate_profile = {**candidate_profile, "skills": data_service.fetch_skills(cid)}
+    candidate_profile = _assemble_candidate_profile(candidate_id)
+    if candidate_profile is None:
+        return {"score": None, "error": f"Candidate {candidate_id} was not found."}
     user = (
         "Job description:\n" + json.dumps(job_description, indent=2) +
         "\n\nCandidate profile:\n" + json.dumps(candidate_profile, indent=2)
@@ -222,7 +230,9 @@ SYSTEM_PROMPT = (
     "active candidates. If get_candidate returns rejected: true, do not send an "
     "interview or next-stage email; tell the recruiter the candidate is marked "
     "rejected and ask how to proceed. Report any status: blocked result plainly "
-    "without claiming the email was sent."
+    "without claiming the email was sent. For explicitly ordered requests, such "
+    "as adding a skill and then scoring, call the next tool only after the "
+    "previous tool succeeds."
 )
 
 agent_model = ChatOpenAI(model=MODEL_NAME, temperature=0)
